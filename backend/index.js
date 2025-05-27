@@ -85,6 +85,16 @@ const qualityPresets = {
     }
 };
 
+// Utility function to create safe directory names
+function createSafeDirectoryName(name) {
+    return name
+        .replace(/[<>:"\/\\|?*\x00-\x1f]/g, '') // Remove invalid characters for Windows/Unix
+        .replace(/['"]/g, '') // Remove quotes // Replace spaces with underscores
+        .replace(/_{2,}/g, '_') // Replace multiple underscores with single
+        .replace(/^_+|_+$/g, '') // Remove leading/trailing underscores
+        .substring(0, 100); // Limit length to avoid path issues
+}
+
 // Extract Spotify track/playlist info
 function extractSpotifyInfo(url) {
     const spotifyRegex = /spotify\.com\/(track|playlist|album)\/([a-zA-Z0-9]+)/;
@@ -334,10 +344,24 @@ app.post('/download', async (req, res) => {
             const albumInfo = await getSpotifyAlbum(spotifyInfo.id);
             tracksToDownload = albumInfo.tracks;
             collectionInfo = { type: 'album', name: albumInfo.name, artist: albumInfo.artist, total_tracks: albumInfo.total_tracks };
+        }        if (tracksToDownload.length === 0) {
+            return res.status(404).json({ error: 'No tracks found' });
         }
 
-        if (tracksToDownload.length === 0) {
-            return res.status(404).json({ error: 'No tracks found' });
+        // Create download directory based on collection type and name
+        let downloadSubDir = downloadsDir;
+        let downloadUrlPrefix = '/downloads';
+        
+        if (spotifyInfo.type === 'playlist' || spotifyInfo.type === 'album') {
+            const safeDirName = createSafeDirectoryName(collectionInfo.name);
+            
+            downloadSubDir = path.join(downloadsDir, safeDirName);
+            downloadUrlPrefix = `/downloads/${safeDirName}`;
+            
+            // Create subdirectory if it doesn't exist
+            if (!fs.existsSync(downloadSubDir)) {
+                fs.mkdirSync(downloadSubDir, { recursive: true });
+            }
         }
 
         // For single track, download immediately
@@ -350,12 +374,11 @@ app.post('/download', async (req, res) => {
                 return res.status(404).json({ error: 'Could not find track on YouTube' });
             }
 
-            const safeFilename = `${track.artist} - ${track.title}`
-                .replace(/[^a-zA-Z0-9\s\-_]/g, '')
-                .replace(/\s+/g, '_');
+            const safeFilename = `${track.title} - ${track.artist} `
+                .replace(/[^a-zA-Z0-9\s\-_]/g, '');
             
             const preset = qualityPresets[quality];
-            const outputPath = path.join(downloadsDir, `${safeFilename}.${preset.format}`);
+            const outputPath = path.join(downloadSubDir, `${safeFilename}.${preset.format}`);
 
             await downloadAudio(videoInfo.url, outputPath, quality, track);
 
@@ -363,7 +386,7 @@ app.post('/download', async (req, res) => {
                 success: true,
                 message: 'Download completed',
                 filename: path.basename(outputPath),
-                downloadUrl: `/downloads/${path.basename(outputPath)}`,
+                downloadUrl: `${downloadUrlPrefix}/${path.basename(outputPath)}`,
                 trackInfo: track,
                 type: 'single'
             });
@@ -373,7 +396,7 @@ app.post('/download', async (req, res) => {
         const jobId = Date.now().toString();
         
         // Start download process in background
-        downloadPlaylist(jobId, tracksToDownload, quality, collectionInfo);
+        downloadPlaylist(jobId, tracksToDownload, quality, collectionInfo, downloadSubDir, downloadUrlPrefix);
 
         res.json({
             success: true,
@@ -394,7 +417,7 @@ app.post('/download', async (req, res) => {
 const downloadJobs = new Map();
 
 // Download playlist/album function
-async function downloadPlaylist(jobId, tracks, quality, collectionInfo) {
+async function downloadPlaylist(jobId, tracks, quality, collectionInfo, downloadDir, downloadUrlPrefix) {
     const job = {
         id: jobId,
         total: tracks.length,
@@ -421,18 +444,17 @@ async function downloadPlaylist(jobId, tracks, quality, collectionInfo) {
             const videoInfo = await searchYouTube(searchQuery);
 
             if (videoInfo && videoInfo.url) {
-                const safeFilename = `${String(i + 1).padStart(2, '0')} - ${track.artist} - ${track.title}`
-                    .replace(/[^a-zA-Z0-9\s\-_]/g, '')
-                    .replace(/\s+/g, '_');
+                const safeFilename = `${String(i + 1).padStart(2, '0')} - ${track.title} - ${track.artist}`
+                    .replace(/[^a-zA-Z0-9\s\-_]/g, '');
                 
-                const outputPath = path.join(downloadsDir, `${safeFilename}.${preset.format}`);
+                const outputPath = path.join(downloadDir, `${safeFilename}.${preset.format}`);
                 
                 await downloadAudio(videoInfo.url, outputPath, quality, track);
                 
                 job.completed++;
                 job.downloadedFiles.push({
                     filename: path.basename(outputPath),
-                    downloadUrl: `/downloads/${path.basename(outputPath)}`,
+                    downloadUrl: `${downloadUrlPrefix}/${path.basename(outputPath)}`,
                     track
                 });
             } else {
@@ -495,6 +517,62 @@ app.get('/download-zip/:jobId', (req, res) => {
         message: 'Batch download ready',
         files: job.downloadedFiles
     });
+});
+
+// Route to list downloads organized by folders
+app.get('/downloads-list', (req, res) => {
+    try {
+        const downloads = {};
+        
+        // Read the downloads directory
+        const items = fs.readdirSync(downloadsDir);
+        
+        items.forEach(item => {
+            const itemPath = path.join(downloadsDir, item);
+            const stats = fs.statSync(itemPath);
+            
+            if (stats.isDirectory()) {
+                // This is a playlist/album folder
+                const files = fs.readdirSync(itemPath)
+                    .filter(file => fs.statSync(path.join(itemPath, file)).isFile())
+                    .map(file => ({
+                        filename: file,
+                        downloadUrl: `/downloads/${item}/${file}`,
+                        size: fs.statSync(path.join(itemPath, file)).size
+                    }));
+                
+                downloads[item] = {
+                    type: 'folder',
+                    files: files,
+                    count: files.length
+                };
+            } else if (stats.isFile()) {
+                // This is a single track in the root downloads folder
+                if (!downloads['_singles']) {
+                    downloads['_singles'] = {
+                        type: 'singles',
+                        files: [],
+                        count: 0
+                    };
+                }
+                
+                downloads['_singles'].files.push({
+                    filename: item,
+                    downloadUrl: `/downloads/${item}`,
+                    size: stats.size
+                });
+                downloads['_singles'].count++;
+            }
+        });
+        
+        res.json({
+            success: true,
+            downloads: downloads
+        });
+    } catch (error) {
+        console.error('Error listing downloads:', error);
+        res.status(500).json({ error: 'Failed to list downloads' });
+    }
 });
 
 // Health check
