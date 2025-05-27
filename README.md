@@ -4,12 +4,14 @@ A modern web application for downloading high-quality music from Spotify URLs us
 
 ## Features
 
-- **Multiple Quality Options**: MP3 (192-320 kbps), FLAC (16/24-bit), WAV (24-bit)
-- **High-Quality Audio**: Support for FLAC 24-bit/44.1kHz downloads
-- **Metadata Preservation**: Automatic metadata embedding (title, artist, album, etc.)
-- **Modern UI**: Beautiful, responsive interface with Tailwind CSS
-- **Support for**: Individual tracks, playlists, and albums
-- **Real-time Progress**: Download status and progress tracking
+- **🎵 Multiple Quality Options**: MP3 (192-320 kbps), FLAC (16/24-bit), WAV (24-bit)
+- **🎨 Automatic Cover Art**: Downloads and embeds album artwork in MP3/FLAC files
+- **📁 Organized Downloads**: Creates folders for playlists and albums
+- **🎼 High-Quality Audio**: Support for FLAC 24-bit/44.1kHz downloads
+- **📝 Metadata Preservation**: Automatic metadata embedding (title, artist, album, etc.)
+- **💻 Modern UI**: Beautiful, responsive interface with Tailwind CSS
+- **📦 Support for**: Individual tracks, playlists, and albums
+- **⏱️ Real-time Progress**: Download status and progress tracking
 
 ## Prerequisites
 
@@ -88,14 +90,14 @@ The frontend will run on `http://localhost:5173`
 
 ## Audio Quality Options
 
-| Format | Quality | Bit Depth | Sample Rate | File Size |
-|--------|---------|-----------|-------------|-----------|
-| MP3 | 320 kbps | - | 44.1 kHz | Medium |
-| MP3 | 256 kbps | - | 44.1 kHz | Medium |
-| MP3 | 192 kbps | - | 44.1 kHz | Small |
-| FLAC | Lossless | 24-bit | 44.1 kHz | Large |
-| FLAC | Lossless | 16-bit | 44.1 kHz | Large |
-| WAV | Uncompressed | 24-bit | 44.1 kHz | Very Large |
+| Format | Quality | Bit Depth | Sample Rate | Cover Art | File Size |
+|--------|---------|-----------|-------------|-----------|-----------|
+| MP3 | 320 kbps | - | 44.1 kHz | ✅ | Medium |
+| MP3 | 256 kbps | - | 44.1 kHz | ✅ | Medium |
+| MP3 | 192 kbps | - | 44.1 kHz | ✅ | Small |
+| FLAC | Lossless | 24-bit | 44.1 kHz | ✅ | Large |
+| FLAC | Lossless | 16-bit | 44.1 kHz | ✅ | Large |
+| WAV | Uncompressed | 24-bit | 44.1 kHz | ❌ | Very Large |
 
 ## Important Notes
 
@@ -125,20 +127,79 @@ The frontend will run on `http://localhost:5173`
    - Try a different quality setting
    - Check your internet connection
 
+## 🎨 Cover Art & Organization
+
+### **Automatic Cover Art Embedding**
+- **MP3 & FLAC**: Cover art is automatically downloaded from Spotify and embedded
+- **High Quality**: Downloads the highest resolution artwork available (up to 640x640px)
+- **Smart Fallback**: Music downloads continue even if cover art fails
+
+### **Organized File Structure**
+```
+downloads/
+├── My_Awesome_Playlist/           # Playlist folder
+│   ├── 01_-_Artist_-_Song1.mp3   # Numbered tracks with cover art
+│   ├── 02_-_Artist_-_Song2.mp3
+│   └── 03_-_Artist_-_Song3.mp3
+├── Album_Name/                    # Album folder
+│   ├── 01_-_Artist_-_Track1.mp3  # Album tracks with cover art
+│   └── 02_-_Artist_-_Track2.mp3
+└── Artist_-_Single_Song.mp3      # Single tracks
+```
+
+### **Cover Art Configuration** (Optional)
+Add to your `.env` file:
+```env
+ENABLE_COVER_ART=true              # Enable/disable cover art
+MAX_COVER_ART_SIZE=5242880         # Max size (5MB default)
+COVER_ART_TIMEOUT=10000            # Timeout (10s default)
+```
+
 ## API Endpoints
 
-- `POST /download` - Start a download
+- `POST /download` - Start a download with cover art
+- `GET /progress/:jobId` - Track download progress
+- `GET /downloads-list` - List organized downloads
+- `GET /config` - Check server configuration
 - `GET /health` - Check server status
-- `GET /downloads/:filename` - Serve downloaded files
+- `GET /downloads/**` - Serve downloaded files
+
+## Troubleshooting
+
+1. **"FFmpeg not found"**:
+   - Make sure FFmpeg is installed and added to your system PATH
+   - Restart your terminal/command prompt after installation
+
+2. **"yt-dlp not found"**:
+   - Install yt-dlp using pip: `pip install yt-dlp`
+   - Or download the executable and add to PATH
+
+3. **"Server connection failed"**:
+   - Make sure the backend server is running on port 3001
+   - Check for any firewall restrictions
+
+4. **Download fails**:
+   - The track might not be available on YouTube
+   - Try a different quality setting
+   - Check your internet connection
+
+5. **Cover art not showing**:
+   - Only MP3 and FLAC formats support embedded cover art
+   - Some albums may not have cover art available
+   - Check `ENABLE_COVER_ART=true` in your `.env` file
 
 ## Future Enhancements
 
-- [ ] Spotify API integration for better metadata
-- [ ] Batch download support
-- [ ] Download progress tracking
+- [x] ✅ Spotify API integration for metadata
+- [x] ✅ Batch download support  
+- [x] ✅ Download progress tracking
+- [x] ✅ Organized folder structure
+- [x] ✅ Automatic cover art embedding
 - [ ] User authentication
 - [ ] Download history
-- [ ] Custom output formats
+- [ ] ZIP download for playlists
+- [ ] Lyrics embedding
+- [ ] Custom naming patterns
 
 ## License
 

@@ -3,6 +3,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 const SpotifyWebApi = require('spotify-web-api-node');
 require('dotenv').config();
 
@@ -45,6 +46,13 @@ const downloadsDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadsDir)) {
     fs.mkdirSync(downloadsDir, { recursive: true });
 }
+
+// Configuration
+const config = {
+    enableCoverArt: process.env.ENABLE_COVER_ART !== 'false', // Default to true
+    maxCoverArtSize: parseInt(process.env.MAX_COVER_ART_SIZE) || 5 * 1024 * 1024, // 5MB default
+    coverArtTimeout: parseInt(process.env.COVER_ART_TIMEOUT) || 10000 // 10 seconds default
+};
 
 // Quality presets for audio formats
 const qualityPresets = {
@@ -95,6 +103,70 @@ function createSafeDirectoryName(name) {
         .substring(0, 100); // Limit length to avoid path issues
 }
 
+// Download cover art from URL with size and timeout limits
+function downloadCoverArt(imageUrl, outputPath) {
+    return new Promise((resolve, reject) => {
+        if (!imageUrl || !config.enableCoverArt) {
+            resolve(null);
+            return;
+        }
+
+        const file = fs.createWriteStream(outputPath);
+        const timeout = setTimeout(() => {
+            file.destroy();
+            fs.unlink(outputPath, () => {});
+            reject(new Error('Cover art download timeout'));
+        }, config.coverArtTimeout);
+        
+        https.get(imageUrl, (response) => {
+            clearTimeout(timeout);
+            
+            if (response.statusCode !== 200) {
+                file.destroy();
+                fs.unlink(outputPath, () => {});
+                reject(new Error(`Failed to download cover art: ${response.statusCode}`));
+                return;
+            }
+            
+            const contentLength = parseInt(response.headers['content-length']);
+            if (contentLength && contentLength > config.maxCoverArtSize) {
+                file.destroy();
+                fs.unlink(outputPath, () => {});
+                reject(new Error('Cover art file too large'));
+                return;
+            }
+            
+            let downloadedSize = 0;
+            
+            response.on('data', (chunk) => {
+                downloadedSize += chunk.length;
+                if (downloadedSize > config.maxCoverArtSize) {
+                    file.destroy();
+                    fs.unlink(outputPath, () => {});
+                    reject(new Error('Cover art file too large'));
+                    return;
+                }
+            });
+            
+            response.pipe(file);
+            
+            file.on('finish', () => {
+                file.close();
+                resolve(outputPath);
+            });
+            
+            file.on('error', (err) => {
+                fs.unlink(outputPath, () => {});
+                reject(err);
+            });
+        }).on('error', (err) => {
+            clearTimeout(timeout);
+            fs.unlink(outputPath, () => {});
+            reject(err);
+        });
+    });
+}
+
 // Extract Spotify track/playlist info
 function extractSpotifyInfo(url) {
     const spotifyRegex = /spotify\.com\/(track|playlist|album)\/([a-zA-Z0-9]+)/;
@@ -123,7 +195,8 @@ async function getSpotifyTrack(trackId) {
             duration_ms: track.body.duration_ms,
             isrc: track.body.external_ids?.isrc,
             preview_url: track.body.preview_url,
-            spotify_url: track.body.external_urls.spotify
+            spotify_url: track.body.external_urls.spotify,
+            album_art_url: track.body.album.images?.[0]?.url || null
         };
     } catch (error) {
         throw new Error(`Failed to get track info: ${error.message}`);
@@ -138,12 +211,11 @@ async function getSpotifyPlaylist(playlistId) {
         
         let offset = 0;
         const limit = 50;
-        
-        do {
+          do {
             const playlistTracks = await spotifyApi.getPlaylistTracks(playlistId, {
                 offset,
                 limit,
-                fields: 'items(track(id,name,artists,album,track_number,duration_ms,external_ids,preview_url,external_urls)),next'
+                fields: 'items(track(id,name,artists,album(name,release_date,images),track_number,duration_ms,external_ids,preview_url,external_urls)),next'
             });
             
             for (const item of playlistTracks.body.items) {
@@ -157,7 +229,8 @@ async function getSpotifyPlaylist(playlistId) {
                         duration_ms: item.track.duration_ms,
                         isrc: item.track.external_ids?.isrc,
                         preview_url: item.track.preview_url,
-                        spotify_url: item.track.external_urls.spotify
+                        spotify_url: item.track.external_urls.spotify,
+                        album_art_url: item.track.album.images?.[0]?.url || null
                     });
                 }
             }
@@ -180,6 +253,8 @@ async function getSpotifyPlaylist(playlistId) {
 async function getSpotifyAlbum(albumId) {
     try {
         const album = await spotifyApi.getAlbum(albumId);
+        const albumArtUrl = album.body.images?.[0]?.url || null;
+        
         const tracks = album.body.tracks.items.map(track => ({
             title: track.name,
             artist: track.artists.map(artist => artist.name).join(', '),
@@ -189,7 +264,8 @@ async function getSpotifyAlbum(albumId) {
             duration_ms: track.duration_ms,
             isrc: track.external_ids?.isrc,
             preview_url: track.preview_url,
-            spotify_url: track.external_urls?.spotify
+            spotify_url: track.external_urls?.spotify,
+            album_art_url: albumArtUrl
         }));
         
         return {
@@ -197,7 +273,8 @@ async function getSpotifyAlbum(albumId) {
             artist: album.body.artists.map(artist => artist.name).join(', '),
             tracks,
             total_tracks: tracks.length,
-            release_date: album.body.release_date
+            release_date: album.body.release_date,
+            album_art_url: albumArtUrl
         };
     } catch (error) {
         throw new Error(`Failed to get album info: ${error.message}`);
@@ -240,78 +317,150 @@ function searchYouTube(query) {
     });
 }
 
-// Download and convert audio
+// Download and convert audio with cover art
 function downloadAudio(videoUrl, outputPath, quality, metadata) {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
         const preset = qualityPresets[quality];
         if (!preset) {
             return reject(new Error('Invalid quality preset'));
         }
 
         const tempPath = outputPath.replace(`.${preset.format}`, '.temp');
+        const coverArtPath = outputPath.replace(`.${preset.format}`, '.cover.jpg');
         
-        // First, download the audio using yt-dlp
-        const ytdlp = spawn('yt-dlp', [
-            '-f', preset.ytdlFormat,
-            '--extract-audio',
-            '--audio-format', 'best',
-            '--no-playlist',
-            '-o', tempPath,
-            videoUrl
-        ]);
-
-        ytdlp.on('close', (code) => {
-            if (code === 0) {
-                // Find the downloaded file (yt-dlp might add extensions)
-                const possibleFiles = fs.readdirSync(path.dirname(tempPath))
-                    .filter(file => file.startsWith(path.basename(tempPath)))
-                    .map(file => path.join(path.dirname(tempPath), file));
-
-                if (possibleFiles.length === 0) {
-                    return reject(new Error('Downloaded file not found'));
+        try {
+            // Download cover art if available
+            let coverArtFile = null;
+            if (metadata.album_art_url) {
+                try {
+                    coverArtFile = await downloadCoverArt(metadata.album_art_url, coverArtPath);
+                    console.log(`Downloaded cover art for: ${metadata.title}`);
+                } catch (error) {
+                    console.log(`Failed to download cover art for ${metadata.title}:`, error.message);
                 }
-
-                const downloadedFile = possibleFiles[0];
-                
-                // Convert using ffmpeg with metadata
-                const ffmpegArgs = [
-                    '-i', downloadedFile,
-                    ...preset.ffmpegOptions,
-                    '-metadata', `title=${metadata.title || 'Unknown'}`,
-                    '-metadata', `artist=${metadata.artist || 'Unknown'}`,
-                    '-metadata', `album=${metadata.album || 'Unknown'}`,
-                    '-metadata', `date=${metadata.year || ''}`,
-                    '-metadata', `track=${metadata.track_number || ''}`,
-                    '-y',
-                    outputPath
-                ];
-
-                const ffmpeg = spawn('ffmpeg', ffmpegArgs);
-
-                ffmpeg.on('close', (ffmpegCode) => {
-                    // Clean up temp file
-                    if (fs.existsSync(downloadedFile)) {
-                        fs.unlinkSync(downloadedFile);
-                    }
-
-                    if (ffmpegCode === 0) {
-                        resolve(outputPath);
-                    } else {
-                        reject(new Error('FFmpeg conversion failed'));
-                    }
-                });
-
-                ffmpeg.stderr.on('data', (data) => {
-                    console.log('FFmpeg stderr:', data.toString());
-                });
-            } else {
-                reject(new Error('yt-dlp download failed'));
             }
-        });
 
-        ytdlp.stderr.on('data', (data) => {
-            console.log('yt-dlp stderr:', data.toString());
-        });
+            // First, download the audio using yt-dlp
+            const ytdlp = spawn('yt-dlp', [
+                '-f', preset.ytdlFormat,
+                '--extract-audio',
+                '--audio-format', 'best',
+                '--no-playlist',
+                '-o', tempPath,
+                videoUrl
+            ]);
+
+            ytdlp.on('close', (code) => {
+                if (code === 0) {
+                    // Find the downloaded file (yt-dlp might add extensions)
+                    const possibleFiles = fs.readdirSync(path.dirname(tempPath))
+                        .filter(file => file.startsWith(path.basename(tempPath)))
+                        .map(file => path.join(path.dirname(tempPath), file));
+
+                    if (possibleFiles.length === 0) {
+                        // Clean up cover art file if exists
+                        if (coverArtFile && fs.existsSync(coverArtFile)) {
+                            fs.unlinkSync(coverArtFile);
+                        }
+                        return reject(new Error('Downloaded file not found'));
+                    }
+
+                    const downloadedFile = possibleFiles[0];
+                    
+                    // Build ffmpeg arguments with metadata and cover art
+                    const ffmpegArgs = [
+                        '-i', downloadedFile
+                    ];
+
+                    // Add cover art as input if available
+                    if (coverArtFile && fs.existsSync(coverArtFile)) {
+                        ffmpegArgs.push('-i', coverArtFile);
+                    }
+
+                    // Add codec and quality options
+                    ffmpegArgs.push(...preset.ffmpegOptions);
+
+                    // Add metadata
+                    ffmpegArgs.push(
+                        '-metadata', `title=${metadata.title || 'Unknown'}`,
+                        '-metadata', `artist=${metadata.artist || 'Unknown'}`,
+                        '-metadata', `album=${metadata.album || 'Unknown'}`,
+                        '-metadata', `date=${metadata.year || ''}`,
+                        '-metadata', `track=${metadata.track_number || ''}`
+                    );
+
+                    // Handle cover art embedding based on format
+                    if (coverArtFile && fs.existsSync(coverArtFile)) {
+                        if (preset.format === 'mp3') {
+                            // For MP3, embed cover art as attached picture
+                            ffmpegArgs.push(
+                                '-map', '0:a',  // Map audio from first input
+                                '-map', '1:v',  // Map video (image) from second input
+                                '-c:v', 'mjpeg', // Use MJPEG codec for cover art
+                                '-disposition:v', 'attached_pic' // Mark as attached picture
+                            );
+                        } else if (preset.format === 'flac') {
+                            // For FLAC, embed cover art
+                            ffmpegArgs.push(
+                                '-map', '0:a',  // Map audio from first input
+                                '-map', '1:v',  // Map video (image) from second input
+                                '-c:v', 'mjpeg', // Use MJPEG codec for cover art
+                                '-disposition:v', 'attached_pic' // Mark as attached picture
+                            );
+                        }
+                        // WAV format doesn't support embedded cover art well, so we skip it
+                    } else {
+                        // No cover art, just map audio
+                        ffmpegArgs.push('-map', '0:a');
+                    }
+
+                    ffmpegArgs.push('-y', outputPath);
+
+                    const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+
+                    let ffmpegError = '';
+                    ffmpeg.stderr.on('data', (data) => {
+                        ffmpegError += data.toString();
+                    });
+
+                    ffmpeg.on('close', (ffmpegCode) => {
+                        // Clean up temp files
+                        if (fs.existsSync(downloadedFile)) {
+                            fs.unlinkSync(downloadedFile);
+                        }
+                        if (coverArtFile && fs.existsSync(coverArtFile)) {
+                            fs.unlinkSync(coverArtFile);
+                        }
+
+                        if (ffmpegCode === 0) {
+                            console.log(`Successfully processed: ${metadata.title} with cover art`);
+                            resolve(outputPath);
+                        } else {
+                            console.error('FFmpeg error:', ffmpegError);
+                            reject(new Error('FFmpeg conversion failed'));
+                        }
+                    });
+
+                } else {
+                    // Clean up cover art file if exists
+                    if (coverArtFile && fs.existsSync(coverArtFile)) {
+                        fs.unlinkSync(coverArtFile);
+                    }
+                    reject(new Error('yt-dlp download failed'));
+                }
+            });
+
+            ytdlp.stderr.on('data', (data) => {
+                console.log('yt-dlp stderr:', data.toString());
+            });
+
+        } catch (error) {
+            // Clean up cover art file if exists
+            if (fs.existsSync(coverArtPath)) {
+                fs.unlinkSync(coverArtPath);
+            }
+            reject(error);
+        }
     });
 }
 
@@ -573,6 +722,20 @@ app.get('/downloads-list', (req, res) => {
         console.error('Error listing downloads:', error);
         res.status(500).json({ error: 'Failed to list downloads' });
     }
+});
+
+// Route to get server configuration
+app.get('/config', (req, res) => {
+    res.json({
+        success: true,
+        config: {
+            enableCoverArt: config.enableCoverArt,
+            maxCoverArtSize: config.maxCoverArtSize,
+            coverArtTimeout: config.coverArtTimeout,
+            supportedFormats: Object.keys(qualityPresets),
+            version: '1.1.0'
+        }
+    });
 });
 
 // Health check
